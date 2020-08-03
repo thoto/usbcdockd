@@ -18,10 +18,24 @@
 #define DESCR "virtual USB type C dock event"
 
 int verb=0;
+int termcolor_on=1;
+const char* termcolor_strings[] = { "\033[0m", "\033[0;31m", "\033[0;34m" };
+#define TERMCOLOR_OFF 0
+#define TERMCOLOR_RED 1
+#define TERMCOLOR_BLUE 2
+#define TERMCOLOR_NONE -1
+void termcolor(int color){
+	if(termcolor_on && color != TERMCOLOR_NONE)
+		printf("%s", termcolor_strings[color]);
+}
+#define VERB(color, ...) \
+	if(verb) { termcolor(color); printf(__VA_ARGS__); \
+		termcolor(TERMCOLOR_OFF); }
 
+// configure evdev and return uinput file descriptor
 int evdev_init(void){
 	struct uinput_setup usetup;
-	int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+	int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
 	int ret;
 	if(fd < 0) err(-1, "uinput device open");
 
@@ -43,6 +57,13 @@ int evdev_init(void){
 	return fd;
 }
 
+int evdev_deinit(int fd){
+	ioctl(fd, UI_DEV_DESTROY);
+	close(fd);
+	VERB(TERMCOLOR_NONE, "quit\n");
+	exit(0);
+}
+
 void evdev_emit(int fd, int type, int code, int val){
 	struct input_event ie;
 	ie.type = type;
@@ -55,28 +76,32 @@ void evdev_emit(int fd, int type, int code, int val){
 		err(-1, "emit event");
 }
 
-void dock_event(int val, int evdev_fd, __attribute__((unused)) char* cmd){
-//	int* pid;
+
+void dock_event(int val, int evdev_fd, char* cmd){
+	pid_t p;
 	evdev_emit(evdev_fd, EV_SW, SW_DOCK, val);
 	evdev_emit(evdev_fd, EV_SYN, SYN_REPORT, 0);
 
-	if(verb)
-		printf("docked = %d\n", val);
+	VERB(TERMCOLOR_RED, "docked = %d%c", val, !cmd?'\n':' ');
+	if(!cmd)
+		return;
+	VERB(TERMCOLOR_RED, "exec cmd %s\n", cmd);
+	p=fork();
+	assert(p >= 0);
+	if(p==0){
+		signal(SIGINT, SIG_DFL);
+		// TODO: close stuff here
+		execl("/bin/sh", "sh", "-c", cmd, (char*) NULL);
+	}
 }
 
-int evdev_deinit(int fd){
-	ioctl(fd, UI_DEV_DESTROY);
-	close(fd);
-	if(verb)
-		printf("quit\n");
-	exit(0);
-}
 #ifdef CONF_UDEV
 
 struct udev_monitor* udev_init(){
 	struct udev* udev;
 	struct udev_monitor* mon;
 	int ret;
+
 	udev = udev_new(); // never fails if malloc does not
 	assert(udev);
 	mon = udev_monitor_new_from_netlink(udev, "udev");
@@ -91,15 +116,14 @@ struct udev_monitor* udev_init(){
 	assert(ret >= 0);
 	return mon;
 }
+
 void udev_deinit(struct udev_monitor* mon){
 	struct udev* udev;
 	if(mon){
 		udev = udev_monitor_get_udev(mon);
 		udev_monitor_unref(mon);
 		udev_unref(udev);
-	}else{
-		warnx("udev monitor not initialised");
-	}
+	}else warnx("udev monitor not initialised");
 }
 
 // vendor and product string must be preallocated
@@ -157,6 +181,41 @@ int udev_match_remove(struct udev_device* udev_dev, char* syspath){
 		return 1;
 	}
 	return 0;
+}
+void udev_dbg(struct udev_device* udev_dev){
+	const char* s;
+	if(verb){
+		s=udev_device_get_action(udev_dev);
+		VERB(TERMCOLOR_BLUE, "action %s: ", s?s:"");
+		s=udev_device_get_sysattr_value(udev_dev,"idVendor");
+		VERB(TERMCOLOR_BLUE, "vendor %s, ", s?s:"");
+		s=udev_device_get_sysattr_value(udev_dev,"idProduct");
+		VERB(TERMCOLOR_BLUE, "product %s, ", s?s:"");
+		s=udev_device_get_syspath(udev_dev);
+		VERB(TERMCOLOR_BLUE, "syspath %s\n", s?s:"");
+	}
+/*					if(verb){
+		s=udev_device_get_sysattr_value(udev_dev,"idVendor");
+		VERB(TERMCOLOR_BLUE, "vendor: %s\n", s?s:"");
+		s=udev_device_get_sysattr_value(udev_dev,"idProduct");
+		VERB(TERMCOLOR_BLUE, "product: %s\n", s?s:"");
+		s=udev_device_get_syspath(udev_dev);
+		VERB(TERMCOLOR_BLUE, "syspath: %s\n", s?s:"");
+		s=udev_device_get_sysname(udev_dev);
+		VERB(TERMCOLOR_BLUE, "sysname: %s\n", s?s:"");
+		s=udev_device_get_sysnum(udev_dev);
+		VERB(TERMCOLOR_BLUE, "sysnum: %s\n", s?s:"");
+		s=udev_device_get_devpath(udev_dev);
+		VERB(TERMCOLOR_BLUE, "devpath: %s\n", s?s:"");
+		s=udev_device_get_devnode(udev_dev);
+		VERB(TERMCOLOR_BLUE, "devnode: %s\n", s?s:"");
+		s=udev_device_get_devtype(udev_dev);
+		VERB(TERMCOLOR_BLUE, "devtype: %s\n", s?s:"");
+		s=udev_device_get_subsystem(udev_dev);
+		VERB(TERMCOLOR_BLUE, "subsystem: %s\n", s?s:"");
+		s=udev_device_get_driver(udev_dev);
+		VERB(TERMCOLOR_BLUE, "driver: %s\n", s?s:"");
+	}*/
 }
 
 #endif
@@ -223,9 +282,9 @@ int main(int argc, char** argv){
 				if(x)
 					errx(-1, "invalid usb vendor/product id string: %s",
 						udev_parse_usbid_errstrs[x]);
-				if(verb)
-					printf("parsing for vendor id %s, product id %s\n",
-						udev_vendor_id, udev_product_id);
+				VERB(TERMCOLOR_NONE,
+					"parsing for vendor id %s, product id %s\n",
+					udev_vendor_id, udev_product_id);
 				break;
 			#endif
 			case '?':
@@ -268,30 +327,8 @@ int main(int argc, char** argv){
 				FD_SET(udev_fd, &udev_fds);
 				x = select(udev_fd+1, &udev_fds, NULL, NULL, NULL);
 				if( x > 0 && FD_ISSET(udev_fd, &udev_fds)){
-					if(verb) printf("yay!\n");
 					udev_dev = udev_monitor_receive_device(udev_mon);
-/*					if(verb){
-						s=udev_device_get_sysattr_value(udev_dev,"idVendor");
-						printf("vendor: %s\n", s?s:"");
-						s=udev_device_get_sysattr_value(udev_dev,"idProduct");
-						printf("product: %s\n", s?s:"");
-						s=udev_device_get_syspath(udev_dev);
-						printf("syspath: %s\n", s?s:"");
-						s=udev_device_get_sysname(udev_dev);
-						printf("sysname: %s\n", s?s:"");
-						s=udev_device_get_sysnum(udev_dev);
-						printf("sysnum: %s\n", s?s:"");
-						s=udev_device_get_devpath(udev_dev);
-						printf("devpath: %s\n", s?s:"");
-						s=udev_device_get_devnode(udev_dev);
-						printf("devnode: %s\n", s?s:"");
-						s=udev_device_get_devtype(udev_dev);
-						printf("devtype: %s\n", s?s:"");
-						s=udev_device_get_subsystem(udev_dev);
-						printf("subsystem: %s\n", s?s:"");
-						s=udev_device_get_driver(udev_dev);
-						printf("driver: %s\n", s?s:"");
-					}*/
+					udev_dbg(udev_dev);
 					if(udev_match_add(udev_dev, udev_vendor_id,
 							udev_product_id)){
 						free(udev_syspath);
@@ -305,20 +342,9 @@ int main(int argc, char** argv){
 						udev_syspath=NULL;
 						dock_event(0, fd, cmd);
 					}
-/*					if(strcmp(udev_device_get_sysattr_value(udev_dev,"idVendor"), udev_vendor_id) == 0
-						&& strcmp(udev_device_get_sysattr_value(udev_dev,"idProduct"), udev_product_id) == 0){
-						if(strcmp(udev_device_get_action(udev_dev), "add") == 0)
-							dock_event(1, fd, cmd);
-						else if(strcmp(udev_device_get_action(udev_dev), "remove")==0)
-							dock_event(0, fd, cmd);
-						else if(verb) printf("unknown event\n");
-					}*/
-
 					udev_device_unref(udev_dev);
-					//FIXME: FD_ZERO?
 				} else assert(NULL);
 			}
-//			pause();
 			break;
 #endif
 		case M_SWITCH: // toggles docked state by key input event
