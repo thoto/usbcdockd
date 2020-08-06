@@ -1,17 +1,14 @@
-#include<linux/uinput.h> // evdev event generation
-#include<fcntl.h> // open()
-#include<unistd.h> // write() close() sleep() pause()
-#include<string.h> // strlen() strncpy()
-//#include<stdio.h>
+#include<unistd.h> // sleep()
+#include<string.h> // strlen() strncpy() strdup()
 #include<stdlib.h> // exit()
-#include<argp.h>
+#include<sys/select.h> // select()
 #include<signal.h>
+
+#include<argp.h>
 #include<err.h>
 #include<assert.h>
-#ifdef CONF_UDEV
-#include<sys/select.h> // select()
+
 #include<libudev.h>
-#endif
 
 #include"common.h"
 #include"evdev.h"
@@ -50,8 +47,6 @@ void dock_event(int val, int evdev_fd, char* cmd){
 		execl("/bin/sh", "sh", "-c", cmd, (char*) NULL);
 	}
 }
-
-#ifdef CONF_UDEV
 
 struct udev_monitor* udev_init(){
 	struct udev* udev;
@@ -142,7 +137,10 @@ void udev_dbg(struct udev_device* udev_dev){
 	const char* s;
 	if(verb){
 		s=udev_device_get_action(udev_dev);
-		VERB(TERMCOLOR_BLUE, "action %s: ", s?s:"");
+		if(s){
+			VERB(TERMCOLOR_BLUE, "action %s: ", s);
+		}else
+			VERB(TERMCOLOR_BLUE, "scanned: ");
 		s=udev_device_get_sysattr_value(udev_dev,"idVendor");
 		VERB(TERMCOLOR_BLUE, "vendor %s, ", s?s:"");
 		s=udev_device_get_sysattr_value(udev_dev,"idProduct");
@@ -193,8 +191,10 @@ struct udev_device* udev_scan_device(struct udev* udev, char* vendor_id,
 	assert(ret >= 0);
 	l = udev_enumerate_get_list_entry(e);
 	assert(l != NULL);
+
 	udev_list_entry_foreach(le, l){
 		d = udev_device_new_from_syspath(udev, udev_list_entry_get_name(le));
+		udev_dbg(d);
 		if(udev_match_add(d, vendor_id, product_id))
 			return d;
 		udev_device_unref(d);
@@ -205,44 +205,26 @@ struct udev_device* udev_scan_device(struct udev* udev, char* vendor_id,
 // TODO: on suspend/resume: does device still exist?
 // via udev_device_new_from_syspath()
 
-#endif
-
-
-
-
-#define M_SWITCH 0
-#define M_DAEMON 1
-#define M_UDEV 2
 
 int main(int argc, char** argv){
 	int fd;
 	int x=0;
 	int o;
 	char* cmd=NULL;
-	int mode=M_SWITCH;
 
-	#ifdef CONF_UDEV
-		struct udev_monitor* udev_mon = NULL;
-		struct udev_device* udev_dev = NULL;
-		int udev_fd;
-		fd_set udev_fds;
-		char udev_vendor_id[5], udev_product_id[5];
-		char* udev_syspath = NULL;
-		const char* s;
-		const char* opts="h?vVr:du:";
-	#else
-		const char* opts="h?vVr:d";
-	#endif
+	struct udev_monitor* udev_mon = NULL;
+	struct udev_device* udev_dev = NULL;
+	int udev_fd;
+	fd_set udev_fds;
+	char udev_vendor_id[5], udev_product_id[5];
+	char* udev_syspath = NULL;
+	const char* s;
+	const char* opts="h?vVr:";
 
 	void quit(int code){
 		dock_event(0, fd, cmd);
 		evdev_deinit(fd);
-
-		#ifdef CONF_UDEV
-		if(mode==M_UDEV){
-			udev_deinit(udev_mon);
-		}
-		#endif
+		udev_deinit(udev_mon);
 		exit(code);
 	}
 	void quit_sig(__attribute__((unused)) int sig){
@@ -250,106 +232,87 @@ int main(int argc, char** argv){
 	}
 	signal(SIGINT, quit_sig);
 
+	#define USAGE fprintf(stderr, "Usage: %s [-h?vV] [-r command] "\
+		"vendor-id:product-id\n", argv[0]);
+
 	// option parsing
 	while((o = getopt(argc, argv, opts)) != -1){
 		switch(o){
+			// functional arguments
 			case 'v': verb=1; break;
 			case 'r': cmd=optarg; break;
+			// other arguments
 			case 'V':
 				fprintf(stderr, "%s: %s version %s\n",argv[0], DESCR, VERSION);
 				exit(0);
 				break;
-			case 'd':
-				mode=M_DAEMON;
-				break;
-			#ifdef CONF_UDEV
-			case 'u':
-				mode=M_UDEV;
-				x = udev_parse_usbid(optarg, udev_vendor_id, udev_product_id);
-				if(x)
-					errx(-1, "invalid usb vendor/product id string: %s",
-						udev_parse_usbid_errstrs[x]);
-				VERB(TERMCOLOR_NONE,
-					"parsing for vendor id %s, product id %s\n",
-					udev_vendor_id, udev_product_id);
-				break;
-			#endif
 			case '?':
 			case 'h':
-				fprintf(stderr, "Usage: %s [-h?vV] [-r command]\n", argv[0]);
+				USAGE;
 				fprintf(stderr, "\t-h, -?\tprint this help and exit\n");
 				fprintf(stderr, "\t-V\tprint version and exit\n");
 				fprintf(stderr, "\t-v\tincrease output verbosity\n");
 				fprintf(stderr, "\t-r\trun command on docking action\n");
-				fprintf(stderr, "\t-d\trun in daemon mode\n");
-				#ifdef CONF_UDEV
-				fprintf(stderr, "\t-u\trun in udev mode\n");
-				#endif
 				exit(0);
 				break;
 			default:
-				fprintf(stderr, "Usage: %s [-h?vV] [-r command]\n", argv[0]);
+				USAGE;
 				exit(1);
 		}
+	}
+
+	if((optind+1) == argc){
+		x = udev_parse_usbid(argv[optind], udev_vendor_id, udev_product_id);
+		if(x)
+			errx(-1, "invalid usb vendor/product id string: %s",
+				udev_parse_usbid_errstrs[x]);
+		VERB(TERMCOLOR_NONE,
+			"parsing for vendor id %s, product id %s\n",
+			udev_vendor_id, udev_product_id);
+	}else{
+		USAGE;
+		exit(1);
 	}
 
 	// initializing and running
 	fd=evdev_init();
 	sleep(1);
-	switch(mode){
-		case M_DAEMON: // sendes docked event until termination by SIGTERM
-			dock_event(1, fd, cmd);
-			pause();
-			break;
-#ifdef CONF_UDEV
-		case M_UDEV:
-			udev_mon = udev_init();
-			if(!udev_mon) quit(-1);
-			assert(udev_mon);
-			udev_fd = udev_monitor_get_fd(udev_mon);
-			assert(udev_fd);
+	udev_mon = udev_init();
+	if(!udev_mon) quit(-1);
+	assert(udev_mon);
+	udev_fd = udev_monitor_get_fd(udev_mon);
+	assert(udev_fd);
 
-			udev_dev = udev_scan_device(udev_monitor_get_udev(udev_mon),
-				udev_vendor_id, udev_product_id);
-			if(udev_dev){
+	udev_dev = udev_scan_device(udev_monitor_get_udev(udev_mon),
+		udev_vendor_id, udev_product_id);
+	if(udev_dev){
+		s = udev_device_get_syspath(udev_dev);
+		udev_syspath = strdup(s);
+		dock_event(1, fd, cmd);
+		udev_device_unref(udev_dev);
+	}
+
+	while(1){
+		FD_ZERO(&udev_fds);
+		FD_SET(udev_fd, &udev_fds);
+		x = select(udev_fd+1, &udev_fds, NULL, NULL, NULL);
+		if( x > 0 && FD_ISSET(udev_fd, &udev_fds)){
+			udev_dev = udev_monitor_receive_device(udev_mon);
+			udev_dbg(udev_dev);
+			if(udev_match_add(udev_dev, udev_vendor_id,
+					udev_product_id)){
+				free(udev_syspath);
 				s = udev_device_get_syspath(udev_dev);
 				udev_syspath = strdup(s);
 				dock_event(1, fd, cmd);
-				udev_device_unref(udev_dev);
 			}
-
-			while(1){
-				FD_ZERO(&udev_fds);
-				FD_SET(udev_fd, &udev_fds);
-				x = select(udev_fd+1, &udev_fds, NULL, NULL, NULL);
-				if( x > 0 && FD_ISSET(udev_fd, &udev_fds)){
-					udev_dev = udev_monitor_receive_device(udev_mon);
-					udev_dbg(udev_dev);
-					if(udev_match_add(udev_dev, udev_vendor_id,
-							udev_product_id)){
-						free(udev_syspath);
-						s = udev_device_get_syspath(udev_dev);
-						udev_syspath = strdup(s);
-						dock_event(1, fd, cmd);
-					}
-					if(udev_match_remove(udev_dev, udev_syspath)){
-						free(udev_syspath);
-						udev_syspath=NULL;
-						dock_event(0, fd, cmd);
-					}
-					udev_device_unref(udev_dev);
-				} else assert(NULL);
+			if(udev_match_remove(udev_dev, udev_syspath)){
+				free(udev_syspath);
+				udev_syspath=NULL;
+				dock_event(0, fd, cmd);
 			}
-			break;
-#endif
-		case M_SWITCH: // toggles docked state by key input event
-		default:
-			dock_event(0, fd, cmd);
-			while(1){
-				getchar();
-				x^=1;
-				dock_event(x, fd, cmd);
-			}
+			udev_device_unref(udev_dev);
+		} else assert(NULL);
 	}
 	quit(0);
 
