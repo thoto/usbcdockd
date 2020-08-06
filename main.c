@@ -333,8 +333,7 @@ int main(int argc, char** argv){
 							udev_product_id)){
 						free(udev_syspath);
 						s = udev_device_get_syspath(udev_dev);
-						udev_syspath = malloc(strlen(s));
-						strncpy(udev_syspath, s, strlen(s));
+						udev_syspath = strdup(s);
 						dock_event(1, fd, cmd);
 					}
 					else if(udev_match_remove(udev_dev, udev_syspath)){
