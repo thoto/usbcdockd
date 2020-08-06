@@ -13,10 +13,12 @@
 #include<libudev.h>
 #endif
 
-#define EVDEV_DEV_NAME "USB type C dock virtual event device"
-#define VERSION "0.0.1"
+#include"common.h"
+#include"evdev.h"
+
 #define DESCR "virtual USB type C dock event"
 
+// *** printing stuff ***
 int verb=0;
 int termcolor_on=1;
 const char* termcolor_strings[] = { "\033[0m", "\033[0;31m", "\033[0;34m" };
@@ -29,58 +31,12 @@ void termcolor(int color){
 		printf("%s", termcolor_strings[color]);
 }
 #define VERB(color, ...) \
-	if(verb) { termcolor(color); printf(__VA_ARGS__); \
-		termcolor(TERMCOLOR_OFF); }
-
-// configure evdev and return uinput file descriptor
-int evdev_init(void){
-	struct uinput_setup usetup;
-	int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
-	int ret;
-	if(fd < 0) err(-1, "uinput device open");
-
-	ioctl(fd, UI_SET_EVBIT, EV_SW);
-	ioctl(fd, UI_SET_SWBIT, SW_DOCK);
-
-	memset(&usetup, 0, sizeof(usetup));
-	usetup.id.bustype = BUS_USB;
-	usetup.id.vendor = 0x1234;
-	usetup.id.product = 0x5678;
-	assert(strlen(EVDEV_DEV_NAME) < UINPUT_MAX_NAME_SIZE);
-	strncpy(usetup.name, EVDEV_DEV_NAME, strlen(EVDEV_DEV_NAME)+1);
-
-	ret = ioctl(fd, UI_DEV_SETUP, &usetup);
-	if(ret < 0) errx(-1, "device setup: 0x%x", ret);
-	ret = ioctl(fd, UI_DEV_CREATE);
-	if(ret < 0) errx(-1, "device creation: 0x%x", ret);
-
-	return fd;
-}
-
-int evdev_deinit(int fd){
-	ioctl(fd, UI_DEV_DESTROY);
-	close(fd);
-	VERB(TERMCOLOR_NONE, "quit\n");
-	exit(0);
-}
-
-void evdev_emit(int fd, int type, int code, int val){
-	struct input_event ie;
-	ie.type = type;
-	ie.code = code;
-	ie.value = val;
-	ie.time.tv_sec = 0;
-	ie.time.tv_usec = 0;
-
-	if(write(fd, &ie, sizeof(ie)) < 0)
-		err(-1, "emit event");
-}
-
+	{ if(verb) { termcolor(color); printf(__VA_ARGS__); \
+		termcolor(TERMCOLOR_OFF); } }
 
 void dock_event(int val, int evdev_fd, char* cmd){
 	pid_t p;
-	evdev_emit(evdev_fd, EV_SW, SW_DOCK, val);
-	evdev_emit(evdev_fd, EV_SYN, SYN_REPORT, 0);
+	evdev_dock_event(evdev_fd, val);
 
 	VERB(TERMCOLOR_RED, "docked = %d%c", val, !cmd?'\n':' ');
 	if(!cmd)
