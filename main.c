@@ -4,7 +4,7 @@
 #include<string.h> // strlen() strncpy()
 //#include<stdio.h>
 #include<stdlib.h> // exit()
-#include<argp.h> // exit()
+#include<argp.h>
 #include<signal.h>
 #include<err.h>
 #include<assert.h>
@@ -163,14 +163,14 @@ const char* udev_parse_usbid_errstrs[] = {"success",
 int udev_match_add(struct udev_device* udev_dev, char* vendor_id,
 		char* product_id){
 	const char* s;
-	if(strcmp(udev_device_get_action(udev_dev), "add") == 0){
-		s = udev_device_get_sysattr_value(udev_dev, "idVendor");
-		if(!s || strcmp(s, vendor_id) != 0) return 0;
-		s = udev_device_get_sysattr_value(udev_dev, "idProduct");
-		if(!s || strcmp(s, product_id) != 0) return 0;
-		return 1;
-	}
-	return 0;
+	 // either no action at all or add action for enumeration and monitor match
+	s=udev_device_get_action(udev_dev);
+	if(s != NULL && strcmp(s, "add") != 0) return 0;
+	s = udev_device_get_sysattr_value(udev_dev, "idVendor");
+	if(!s || strcmp(s, vendor_id) != 0) return 0;
+	s = udev_device_get_sysattr_value(udev_dev, "idProduct");
+	if(!s || strcmp(s, product_id) != 0) return 0;
+	return 1;
 }
 int udev_match_remove(struct udev_device* udev_dev, char* syspath){
 	const char* s;
@@ -217,6 +217,37 @@ void udev_dbg(struct udev_device* udev_dev){
 		VERB(TERMCOLOR_BLUE, "driver: %s\n", s?s:"");
 	}*/
 }
+
+struct udev_device* udev_scan_device(struct udev* udev, char* vendor_id,
+		char* product_id){
+	struct udev_enumerate* e;
+	struct udev_list_entry* l;
+	struct udev_list_entry* le;
+	struct udev_device* d;
+	int ret;
+
+	e = udev_enumerate_new(udev);
+	ret = udev_enumerate_add_match_subsystem(e, "usb");
+	assert(ret >= 0);
+	// since matching multiple properties does not work, match just devtype
+	// better filtering could be achieved by matching model_id
+	ret = udev_enumerate_add_match_property(e, "DEVTYPE", "usb_device");
+	assert(ret >= 0);
+	ret = udev_enumerate_scan_devices(e);
+	assert(ret >= 0);
+	l = udev_enumerate_get_list_entry(e);
+	assert(l != NULL);
+	udev_list_entry_foreach(le, l){
+		d = udev_device_new_from_syspath(udev, udev_list_entry_get_name(le));
+		if(udev_match_add(d, vendor_id, product_id))
+			return d;
+		udev_device_unref(d);
+	};
+	return NULL;
+}
+
+// TODO: on suspend/resume: does device still exist?
+// via udev_device_new_from_syspath()
 
 #endif
 
@@ -322,6 +353,15 @@ int main(int argc, char** argv){
 			udev_fd = udev_monitor_get_fd(udev_mon);
 			assert(udev_fd);
 
+			udev_dev = udev_scan_device(udev_monitor_get_udev(udev_mon),
+				udev_vendor_id, udev_product_id);
+			if(udev_dev){
+				s = udev_device_get_syspath(udev_dev);
+				udev_syspath = strdup(s);
+				dock_event(1, fd, cmd);
+				udev_device_unref(udev_dev);
+			}
+
 			while(1){
 				FD_ZERO(&udev_fds);
 				FD_SET(udev_fd, &udev_fds);
@@ -336,7 +376,7 @@ int main(int argc, char** argv){
 						udev_syspath = strdup(s);
 						dock_event(1, fd, cmd);
 					}
-					else if(udev_match_remove(udev_dev, udev_syspath)){
+					if(udev_match_remove(udev_dev, udev_syspath)){
 						free(udev_syspath);
 						udev_syspath=NULL;
 						dock_event(0, fd, cmd);
